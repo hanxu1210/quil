@@ -471,16 +471,24 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				}
 				return "/opt/quil/quild", nil
 			}
-			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, "default", tt.userArgs)
+			quilDir := t.TempDir()
+			prefix, env := claudeHookSpawnPrep(quilDir, tt.paneID, "default", tt.userArgs)
 			if tt.wantPrefix {
 				if len(prefix) != 2 || prefix[0] != "--settings" {
 					t.Errorf("prefix = %v, want [--settings ...]", prefix)
 				}
-				if !strings.Contains(prefix[1], `"SessionStart"`) {
-					t.Errorf("prefix[1] missing SessionStart key: %s", prefix[1])
+				// The settings are written to a per-pane file (not an inline
+				// JSON string) so the quotes survive Windows .cmd shims. Read
+				// the file the path points at and assert its contents.
+				body, err := os.ReadFile(prefix[1])
+				if err != nil {
+					t.Fatalf("read settings file %s: %v", prefix[1], err)
 				}
-				if !strings.Contains(prefix[1], "claude-hook") {
-					t.Errorf("prefix[1] missing native claude-hook command: %s", prefix[1])
+				if !strings.Contains(string(body), `"SessionStart"`) {
+					t.Errorf("settings file missing SessionStart key: %s", body)
+				}
+				if !strings.Contains(string(body), "claude-hook") {
+					t.Errorf("settings file missing native claude-hook command: %s", body)
 				}
 			} else if prefix != nil {
 				t.Errorf("prefix = %v, want nil", prefix)
@@ -502,8 +510,8 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				if env[1] != "QUIL_HOOK_MODE=default" {
 					t.Errorf("env[1] = %q, want QUIL_HOOK_MODE=default", env[1])
 				}
-				if env[2] != "QUIL_HOOK_HOME=/tmp/quil" {
-					t.Errorf("env[2] = %q, want QUIL_HOOK_HOME=/tmp/quil", env[2])
+				if env[2] != "QUIL_HOOK_HOME="+quilDir {
+					t.Errorf("env[2] = %q, want QUIL_HOOK_HOME=%s", env[2], quilDir)
 				}
 			}
 		})

@@ -2140,7 +2140,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", paneID + ".transcript", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", paneID + ".settings.json", "opencode-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -3235,6 +3235,12 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 // pre-feature behaviour rather than failing the whole spawn. Logs a warning if
 // userArgs already contain --settings; Claude treats later wins, so our
 // prepend silently overrides the user's value.
+//
+// The settings are written to a per-pane FILE and passed as
+// `--settings <path>` rather than an inline JSON string. On Windows the
+// claude/tclaude binary is an npm .cmd shim that cmd.exe re-parses, and the
+// quotes inside an inline JSON are split at the wrong boundaries by cmd.exe —
+// a path has no shell metacharacters and survives every shell layer.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	exePath, err := claudeHookExeFn()
 	if err != nil {
@@ -3244,6 +3250,11 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(exePath))
 	if err != nil {
 		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
+		return nil, nil
+	}
+	settingsPath, err := claudehook.WriteSettingsFile(quilDir, paneID, js)
+	if err != nil {
+		log.Printf("warning: pane %s: write hook settings file: %v — session-id rotation tracking disabled", paneID, err)
 		return nil, nil
 	}
 	for _, a := range userArgs {
@@ -3260,7 +3271,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	// correct data dir; renamed from QUIL_HOME because children inherit the
 	// pane env and an inherited QUIL_HOME retargeted dev builds at production.
 	// Consumers fall back to QUIL_HOME for one release.
-	return []string{"--settings", js}, []string{
+	return []string{"--settings", settingsPath}, []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
 		"QUIL_HOOK_HOME=" + quilDir,

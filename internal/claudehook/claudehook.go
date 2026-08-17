@@ -198,6 +198,42 @@ func BuildSettingsJSON(cmd string) (string, error) {
 	return string(b), nil
 }
 
+// settingsFile returns the absolute path of the per-pane hook-settings JSON
+// written under <quilDir>/sessions/. A file (rather than an inline --settings
+// JSON string) is used because on Windows the claude/tclaude binary is an npm
+// .cmd shim that cmd.exe re-parses: the quotes inside an inline JSON are
+// stripped/reshaped by cmd.exe and the argument is split at the wrong
+// boundaries, so the hook never registers and a fragment of the JSON is
+// mistaken for a command. A path has no shell metacharacters, so it survives
+// every shell layer intact. The file is per-pane so concurrent spawns never
+// race on one shared file.
+func settingsFile(quilDir, paneID string) string {
+	return filepath.Join(quilDir, "sessions", paneID+".settings.json")
+}
+
+// WriteSettingsFile writes the hook-settings JSON for paneID to disk and
+// returns its absolute path. The daemon passes this path to
+// `claude --settings <path>` (claude accepts a file path or an inline JSON
+// string). Returns "" with a nil error only when there is nothing to write
+// (empty JSON), which lets the caller skip the --settings arg entirely.
+func WriteSettingsFile(quilDir, paneID, settingsJSON string) (string, error) {
+	if err := validatePaneID(paneID); err != nil {
+		return "", err
+	}
+	if settingsJSON == "" {
+		return "", nil
+	}
+	dir := filepath.Join(quilDir, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create sessions dir: %w", err)
+	}
+	path := settingsFile(quilDir, paneID)
+	if err := atomicWrite(path, []byte(settingsJSON), 0o600); err != nil {
+		return "", fmt.Errorf("write hook settings: %w", err)
+	}
+	return path, nil
+}
+
 // sessionIDFile returns the absolute path to <paneID>.id.
 func sessionIDFile(quilDir, paneID string) string {
 	return filepath.Join(quilDir, "sessions", paneID+".id")
