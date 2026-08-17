@@ -1279,8 +1279,8 @@ func maxContentLineWidth(content string) int {
 func (m Model) renderAboutDialog() string {
 	var b strings.Builder
 
-	title := dialogTitle.Render("Quil v" + m.version)
-	link := dialogSubtle.Render("github.com/artyomsv/quil")
+	title := dialogTitle.Render("Tquil v" + m.version)
+	link := dialogSubtle.Render("git.woa.com/dennishan/tquil")
 
 	b.WriteString(lipgloss.PlaceHorizontal(dialogWidth, lipgloss.Center, title))
 	b.WriteByte('\n')
@@ -1320,16 +1320,14 @@ func (m Model) renderDisclaimerDialog() string {
 	w := disclaimerWidth
 
 	// Title
-	title := dialogTitle.Render("Quil v" + m.version + " -- Early Beta")
+	title := dialogTitle.Render("Tquil v" + m.version + " -- Early Beta")
 	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, title))
 	b.WriteString("\n\n")
 
 	// Beta notice
 	b.WriteString(dialogSubtle.Render("  This software is in early beta. Some features may"))
 	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("  not work as expected. Linux and macOS support has"))
-	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("  not been fully tested yet."))
+	b.WriteString(dialogSubtle.Render("  not work as expected."))
 	b.WriteString("\n\n")
 
 	// Separator

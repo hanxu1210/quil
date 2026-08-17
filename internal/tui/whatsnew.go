@@ -37,7 +37,7 @@ const whatsNewChromeRows = 6
 const whatsNewPageRows = 10
 
 // releasesURL is the footer link — the full, unabridged changelog.
-const releasesURL = "github.com/artyomsv/quil/releases"
+const releasesURL = "git.woa.com/dennishan/tquil/-/releases"
 
 // whatsNewWidth clamps the dialog to the terminal. A zero or unknown width
 // falls back to the maximum: NewModel builds this dialog before the first

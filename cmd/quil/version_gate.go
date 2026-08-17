@@ -19,7 +19,7 @@ import (
 // releasesURL is shown to users running an older TUI against a newer
 // daemon. Kept in one place so future URL changes don't need to hunt
 // through the prompt text.
-const releasesURL = "https://github.com/artyomsv/quil/releases"
+const releasesURL = "https://git.woa.com/dennishan/tquil/-/releases"
 
 // gateVersionCheck runs the version handshake against the daemon the
 // caller has already connected to. If versions match it returns the
