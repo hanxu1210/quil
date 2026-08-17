@@ -239,6 +239,284 @@ func sessionIDFile(quilDir, paneID string) string {
 	return filepath.Join(quilDir, "sessions", paneID+".id")
 }
 
+// projectSettingsDir is the .claude directory claude/tclaude reads project- and
+// local-scoped settings from, relative to the pane's CWD. settings.local.json is
+// the local scope (gitignored, trusted as the user's own) — claude loads it
+// automatically WITHOUT a --settings flag, so it survives the tclaude wrapper
+// (which injects its own --settings {availableModels} and, because claude is
+// first-wins on multiple --settings, drops the hooks Quil passes via --settings).
+// The hooks key MERGES across scopes, so Quil's SessionStart hook here coexists
+// with whatever the user already has in this file.
+const (
+	projectSettingsDir   = ".claude"
+	projectSettingsFile  = "settings.local.json"
+	projectPanesRefcount = ".quil-panes" // one paneID per line; when empty, Quil owns no hook here
+)
+
+// projectSettingsPath returns the absolute settings.local.json path for a CWD.
+func projectSettingsPath(cwd string) string {
+	return filepath.Join(cwd, projectSettingsDir, projectSettingsFile)
+}
+
+// projectRefcountPath returns the absolute .quil-panes path for a CWD.
+func projectRefcountPath(cwd string) string {
+	return filepath.Join(cwd, projectSettingsDir, projectPanesRefcount)
+}
+
+// isQuilHookEntry reports whether a SessionStart hook entry is the one Quil
+// injects — i.e. its inner hooks array contains a command entry whose command
+// equals hookCmd. A SessionStart entry is {"hooks":[{"type":"command","command":...}]},
+// so the command lives one level down, not on the entry itself. Used to find
+// and replace/remove Quil's own entry without touching the user's hooks.
+func isQuilHookEntry(entry map[string]any, hookCmd string) bool {
+	inner, ok := entry["hooks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, h := range inner {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := hm["command"].(string); cmd == hookCmd {
+			return true
+		}
+	}
+	return false
+}
+
+// WriteProjectHook registers the SessionStart hook for a tclaude pane by
+// merging it into <cwd>/.claude/settings.local.json (the local settings scope
+// claude auto-loads). Unlike --settings, this survives the tclaude wrapper.
+//
+// A refcount file (<cwd>/.claude/.quil-panes, one paneID per line) tracks how
+// many Quil tclaude panes share this CWD: the hook is written once and shared
+// (the hook command is identical for every pane — each pane's claude process
+// carries its own QUIL_PANE_ID env, which is how the hook subprocess tells them
+// apart). RemoveProjectHook decrements the refcount and only removes the hook
+// when the last pane leaves.
+//
+// Best-effort like the rest of the package: a write failure is returned as an
+// error so the daemon can log it and proceed without rotation tracking, but it
+// never blocks the spawn.
+func WriteProjectHook(cwd, paneID, hookCmd string) error {
+	if err := validatePaneID(paneID); err != nil {
+		return err
+	}
+	if cwd == "" || hookCmd == "" {
+		return nil
+	}
+	dir := filepath.Join(cwd, projectSettingsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create project .claude dir: %w", err)
+	}
+
+	// Add the pane to the refcount first. If the file did not already contain
+	// this paneID, the hook needs (re)writing; if it did, the hook is already
+	// in place (idempotent re-spawn of the same pane).
+	added, err := addRefcount(dir, paneID)
+	if err != nil {
+		return fmt.Errorf("update refcount: %w", err)
+	}
+	if !added {
+		return nil // already registered, hook already present
+	}
+	return mergeProjectHook(projectSettingsPath(cwd), hookCmd)
+}
+
+// RemoveProjectHook decrements the refcount for paneID in <cwd>/.claude. When
+// the last Quil pane leaves the CWD it removes the Quil hook from
+// settings.local.json (preserving the user's own hooks), and if the file ends
+// up with no hooks at all, removes the file. The refcount file is removed once
+// empty. Safe to call for a pane that was never registered (no-op).
+func RemoveProjectHook(cwd, paneID string) error {
+	if err := validatePaneID(paneID); err != nil {
+		return err
+	}
+	if cwd == "" {
+		return nil
+	}
+	dir := filepath.Join(cwd, projectSettingsDir)
+	remaining, err := removeRefcount(dir, paneID)
+	if err != nil {
+		return fmt.Errorf("update refcount: %w", err)
+	}
+	if remaining > 0 {
+		return nil // other panes still need the hook
+	}
+	// Last pane out: strip the Quil hook. Pass an empty hookCmd to signal
+	// removal — any Quil entry (recognised by the claude-hook subcommand suffix)
+	// goes, the user's hooks stay.
+	return removeProjectHook(projectSettingsPath(cwd))
+}
+
+// addRefcount appends paneID to <dir>/.quil-panes if absent. Returns
+// (added=true, nil) when it was newly added, (false, nil) when already present.
+func addRefcount(dir, paneID string) (bool, error) {
+	path := filepath.Join(dir, projectPanesRefcount)
+	existing, _ := os.ReadFile(path)
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == paneID {
+			return false, nil
+		}
+	}
+	body := string(existing)
+	if len(body) > 0 && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	body += paneID + "\n"
+	return true, atomicWrite(path, []byte(body), 0o644)
+}
+
+// removeRefcount removes paneID from <dir>/.quil-panes and returns how many
+// panes remain. Removes the refcount file when it empties.
+func removeRefcount(dir, paneID string) (int, error) {
+	path := filepath.Join(dir, projectPanesRefcount)
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var kept []string
+	for _, line := range strings.Split(string(existing), "\n") {
+		if id := strings.TrimSpace(line); id != "" && id != paneID {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		return 0, nil
+	}
+	body := strings.Join(kept, "\n") + "\n"
+	if err := atomicWrite(path, []byte(body), 0o644); err != nil {
+		return 0, err
+	}
+	return len(kept), nil
+}
+
+// mergeProjectHook ensures exactly one Quil SessionStart hook entry exists in
+// settingsPath, preserving any other hooks the user configured there. The file
+// is created if absent. Quil's entry is recognised by command == hookCmd.
+func mergeProjectHook(settingsPath, hookCmd string) error {
+	settings := readProjectSettings(settingsPath)
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = make(map[string]any)
+	}
+	// SessionStart is the only event Quil needs from the project file (it is
+	// the rotation edge). Other forwarded events stay on the --settings path,
+	// which claude-code (not tclaude) still uses.
+	entries, _ := hooks["SessionStart"].([]any)
+	// Drop any existing Quil entry, keep the user's.
+	filtered := entries[:0]
+	for _, e := range entries {
+		if m, ok := e.(map[string]any); ok && isQuilHookEntry(m, hookCmd) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	filtered = append(filtered, map[string]any{
+		"hooks": []map[string]any{
+			{"type": "command", "command": hookCmd},
+		},
+	})
+	hooks["SessionStart"] = filtered
+	settings["hooks"] = hooks
+	return writeProjectSettings(settingsPath, settings)
+}
+
+// removeProjectHook strips every Quil SessionStart entry from settingsPath
+// (any entry whose command is the quil claude-hook subcommand), preserving the
+// user's hooks. If the file has no hooks left at all, it is deleted so Quil
+// leaves no trace in a project it has fully vacated.
+func removeProjectHook(settingsPath string) error {
+	settings := readProjectSettings(settingsPath)
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		return nil // nothing Quil put there
+	}
+	if entries, ok := hooks["SessionStart"].([]any); ok {
+		filtered := entries[:0]
+		for _, e := range entries {
+			m, ok := e.(map[string]any)
+			if !ok {
+				filtered = append(filtered, e)
+				continue
+			}
+			// A SessionStart entry is {"hooks":[{"type":"command","command":...}]}.
+			// Drop the quil command from the inner hooks array; if that empties
+			// the entry, drop the entry itself. The user's own hooks (different
+			// commands) stay.
+			inner, _ := m["hooks"].([]any)
+			keptInner := inner[:0]
+			quilEntry := false
+			for _, h := range inner {
+				hm, ok := h.(map[string]any)
+				if !ok {
+					keptInner = append(keptInner, h)
+					continue
+				}
+				cmd, _ := hm["command"].(string)
+				if strings.HasSuffix(cmd, "claude-hook") {
+					quilEntry = true
+					continue
+				}
+				keptInner = append(keptInner, h)
+			}
+			if quilEntry && len(keptInner) == 0 {
+				continue // entry was quil-only; drop it
+			}
+			if quilEntry {
+				m["hooks"] = keptInner
+			}
+			filtered = append(filtered, e)
+		}
+		if len(filtered) == 0 {
+			delete(hooks, "SessionStart")
+		} else {
+			hooks["SessionStart"] = filtered
+		}
+	}
+	if len(hooks) == 0 {
+		delete(settings, "hooks")
+	}
+	if len(settings) == 0 {
+		_ = os.Remove(settingsPath)
+		return nil
+	}
+	return writeProjectSettings(settingsPath, settings)
+}
+
+// readProjectSettings decodes settingsPath as a flat JSON object, tolerating
+// absence and malformed content (the latter degrades to an empty object so a
+// corrupt user file never blocks the spawn).
+func readProjectSettings(settingsPath string) map[string]any {
+	settings := make(map[string]any)
+	body, err := os.ReadFile(settingsPath)
+	if err != nil || len(body) == 0 {
+		return settings
+	}
+	if json.Unmarshal(body, &settings) != nil {
+		return make(map[string]any)
+	}
+	return settings
+}
+
+// writeProjectSettings encodes settings to settingsPath atomically. 0o644 so
+// the user's own tooling can read it; it is gitignored by claude convention.
+func writeProjectSettings(settingsPath string, settings map[string]any) error {
+	body, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return atomicWrite(settingsPath, body, 0o644)
+}
+
 // transcriptFile returns the absolute path to <paneID>.transcript, the sidecar
 // recording where the pane's session transcript CURRENTLY lives.
 //

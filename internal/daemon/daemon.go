@@ -2146,6 +2146,18 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
 		}
 	}
+	// tclaude panes register their SessionStart hook in <cwd>/.claude/settings
+	// .local.json (the --settings path is dropped by the tclaude wrapper).
+	// Decrement that CWD's refcount; when the last tclaude pane leaves, the
+	// hook is removed. The pane is still in the session here (cleanup runs
+	// before DestroyPane at the destroy site), so its CWD/Type are reachable;
+	// if a caller destroys the pane first, this lookup misses and the refcount
+	// stays — a harmless leftover hook (quild no-ops without QUIL_PANE_ID).
+	if pane := d.session.Pane(paneID); pane != nil && pane.Type == "tclaude" {
+		if err := claudehook.RemoveProjectHook(pane.CWD, paneID); err != nil {
+			log.Printf("cleanup pane %s: remove project hook: %v", paneID, err)
+		}
+	}
 	if err := os.Remove(panehistory.Path(config.QuilDir(), paneID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("cleanup pane %s: remove history: %v", paneID, err)
 	}
@@ -3278,6 +3290,32 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	}
 }
 
+// tclaudeHookSpawnPrep registers the SessionStart hook for a tclaude pane via
+// the project local-settings file (<cwd>/.claude/settings.local.json) instead
+// of --settings. See the spawnPane switch: the tclaude wrapper's own
+// --settings {availableModels} (ahead of Quil's, and claude is first-wins)
+// would drop a --settings hook, so the hook is planted where claude reads it
+// unconditionally. Returns the pane env vars the hook subprocess needs; the
+// hook command itself lives in the settings file, not on the argv.
+func tclaudeHookSpawnPrep(cwd, paneID, hookMode string) ([]string, error) {
+	exePath, err := claudeHookExeFn()
+	if err != nil {
+		return nil, fmt.Errorf("resolve quild executable: %w", err)
+	}
+	if err := claudehook.WriteProjectHook(cwd, paneID, claudehook.HookCommand(exePath)); err != nil {
+		return nil, fmt.Errorf("write project hook: %w", err)
+	}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
+	return []string{
+		"QUIL_PANE_ID=" + paneID,
+		"QUIL_HOOK_MODE=" + mode,
+		"QUIL_HOOK_HOME=" + config.QuilDir(),
+	}, nil
+}
+
 // resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
 // expand on the restore branch. Dispatches by plugin name to plugin-specific
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
@@ -3745,20 +3783,28 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
 	switch p.Name {
-	case "claude-code", "tclaude":
-		// Inject the SessionStart hook (writes ~/.quil/sessions/<paneID>.id,
-		// the authoritative id the restore path resumes). For claude-code this
-		// works as designed. For tclaude the hook is injected identically, but
-		// the tclaude wrapper does not execute hooks passed via --settings, so
-		// the .id file is never written and in-pane /clear /resume /compaction
-		// rotation is NOT tracked for tclaude — a restart resumes the
-		// workspace.json session_id (the pre-rotation one) instead. The core
-		// reboot-resume still works because it reads workspace.json, not the
-		// hook file. paneID is a UUID unique across plugin types, so claude-code
-		// and tclaude panes never collide on the same .id file.
+	case "claude-code":
+		// Inject the SessionStart hook via --settings. claude-code (no wrapper)
+		// executes hooks from --settings as designed, so the hook fires and
+		// writes ~/.quil/sessions/<paneID>.id — the authoritative id the restore
+		// path resumes, refreshed on /clear /resume /compaction rotation.
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
+		}
+		envVars = append(envVars, hookEnv...)
+	case "tclaude":
+		// tclaude (Tencent wrapper) injects its own --settings {availableModels}
+		// ahead of any --settings Quil passes; claude is first-wins on multiple
+		// --settings, so Quil's hook there is dropped. Register the hook in
+		// <cwd>/.claude/settings.local.json instead — the local settings scope
+		// claude auto-loads WITHOUT --settings, and hooks MERGE across scopes,
+		// so it survives the wrapper and coexists with the user's own hooks.
+		// paneID is a UUID unique across plugin types; the hook command reads
+		// QUIL_PANE_ID from the pane env to attribute the session-id write.
+		hookEnv, err := tclaudeHookSpawnPrep(pane.CWD, pane.ID, d.cfg.Notification.Hooks.Claude)
+		if err != nil {
+			log.Printf("warning: pane %s: tclaude project hook: %v — session-id rotation tracking disabled", pane.ID, err)
 		}
 		envVars = append(envVars, hookEnv...)
 	case "opencode":
