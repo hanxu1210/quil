@@ -414,7 +414,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	}
 
 	switch tp.Command.Sessions {
-	case "", "claude":
+	case "", "claude", "tclaude":
 		// valid
 	default:
 		return nil, fmt.Errorf("plugin %q: unknown sessions source %q", tp.Plugin.Name, tp.Command.Sessions)

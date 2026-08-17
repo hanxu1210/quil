@@ -71,13 +71,14 @@ type sessionScanTimeoutMsg struct{ cwd string }
 
 // requestClaudeSessions fires MsgClaudeSessionsReq for cwd (fire-and-forget);
 // the response arrives via listenForMessages → claudeSessionsRespMsg. Mirrors
-// requestPaneSearch.
-func (m Model) requestClaudeSessions(cwd string) tea.Cmd {
+// requestPaneSearch. source routes the daemon's transcript read: "" or "claude"
+// reads ~/.claude, "tclaude" reads ~/.tclaude.
+func (m Model) requestClaudeSessions(cwd, source string) tea.Cmd {
 	return func() tea.Msg {
 		if m.client == nil {
 			return nil
 		}
-		msg, err := ipc.NewMessage(ipc.MsgClaudeSessionsReq, ipc.ClaudeSessionsReqPayload{CWD: cwd})
+		msg, err := ipc.NewMessage(ipc.MsgClaudeSessionsReq, ipc.ClaudeSessionsReqPayload{CWD: cwd, Source: source})
 		if err != nil {
 			log.Printf("requestClaudeSessions: marshal: %v", err)
 			return nil
@@ -97,6 +98,21 @@ func sessionScanTimeoutCmd(cwd string) tea.Cmd {
 	return tea.Tick(sessionScanTimeout, func(time.Time) tea.Msg {
 		return sessionScanTimeoutMsg{cwd: cwd}
 	})
+}
+
+// selectedSessionSource returns the session-source string for the plugin
+// currently selected in the create-pane dialog — "claude", "tclaude", or ""
+// when the plugin has no session picker. The daemon routes its transcript read
+// by this value: ~/.claude vs ~/.tclaude.
+func (m Model) selectedSessionSource() string {
+	if m.pluginRegistry == nil || m.selectedPlugin == "" {
+		return ""
+	}
+	p := m.pluginRegistry.Get(m.selectedPlugin)
+	if p == nil {
+		return ""
+	}
+	return p.Command.Sessions
 }
 
 // ensureSessionScan issues a session listing for wherever the pane will
@@ -137,7 +153,12 @@ func (m *Model) ensureSessionScan() tea.Cmd {
 	// The panel describes a row that is about to be replaced, and its response
 	// is matched on the CWD that just changed — it could never resolve.
 	m.closeSessionDetail()
-	return tea.Batch(m.requestClaudeSessions(cwd), sessionScanTimeoutCmd(cwd))
+	// Source routes the daemon's transcript read to the right config dir
+	// (~/.claude vs ~/.tclaude). The selected plugin's sessions field carries
+	// it: "claude" or "tclaude". Empty means no picker, but this path only runs
+	// for plugins that have one.
+	source := m.selectedSessionSource()
+	return tea.Batch(m.requestClaudeSessions(cwd, source), sessionScanTimeoutCmd(cwd))
 }
 
 // resetSessionSelection discards the rows and the committed choice. Called when
@@ -218,13 +239,14 @@ type sessionDetailTimeoutMsg struct{ id string }
 
 // requestClaudeSessionDetail fires MsgClaudeSessionDetailReq (fire-and-forget);
 // the response arrives via listenForMessages. Mirrors requestClaudeSessions.
-func (m Model) requestClaudeSessionDetail(cwd, sessionID string) tea.Cmd {
+// source routes the read to ~/.claude or ~/.tclaude, matching the listing.
+func (m Model) requestClaudeSessionDetail(cwd, sessionID, source string) tea.Cmd {
 	return func() tea.Msg {
 		if m.client == nil {
 			return nil
 		}
 		msg, err := ipc.NewMessage(ipc.MsgClaudeSessionDetailReq,
-			ipc.ClaudeSessionDetailReqPayload{CWD: cwd, SessionID: sessionID})
+			ipc.ClaudeSessionDetailReqPayload{CWD: cwd, SessionID: sessionID, Source: source})
 		if err != nil {
 			log.Printf("requestClaudeSessionDetail: marshal: %v", err)
 			return nil
@@ -258,7 +280,7 @@ func (m *Model) ensureSessionDetail() tea.Cmd {
 	}
 	m.sessionDetail = sessionDetailPanel{open: true, id: s.ID, state: sessionScanning}
 	return tea.Batch(
-		m.requestClaudeSessionDetail(m.sessionScanCWD, s.ID),
+		m.requestClaudeSessionDetail(m.sessionScanCWD, s.ID, m.selectedSessionSource()),
 		tea.Tick(sessionScanTimeout, func(time.Time) tea.Msg {
 			return sessionDetailTimeoutMsg{id: s.ID}
 		}),

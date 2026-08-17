@@ -732,7 +732,7 @@ type restoreStep struct {
 // buffer. For these tools the conversation comes back even though Quil saves no
 // ghost buffer (HistoryLines == 0).
 func restoresViaSession(paneType string) bool {
-	return paneType == "claude-code" || paneType == "opencode"
+	return paneType == "claude-code" || paneType == "opencode" || paneType == "tclaude"
 }
 
 // resumeLabel is row 3 of the checklist: a human description of the resume
@@ -743,6 +743,8 @@ func resumeLabel(paneType, sessionID string) string {
 	switch paneType {
 	case "claude-code":
 		base = "resuming claude"
+	case "tclaude":
+		base = "resuming tclaude"
 	case "opencode":
 		base = "resuming opencode"
 	case "ssh":

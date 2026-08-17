@@ -19,11 +19,12 @@ import (
 func stubSessionList(t *testing.T, fn func(cwd string) ([]claudesessions.Session, bool, error)) {
 	t.Helper()
 	prev := listClaudeSessionsFn
-	// Adapts the ctx-free stub the tests write onto the ctx-aware seam. Keeping
-	// the ergonomic signature here avoids threading a parameter through every
-	// stub body when none of them exercise cancellation — the packages that own
-	// that behaviour test it directly.
-	listClaudeSessionsFn = func(_ context.Context, cwd string) ([]claudesessions.Session, bool, error) {
+	// Adapts the ctx-free stub the tests write onto the source/ctx-aware seam.
+	// Keeping the ergonomic signature here avoids threading parameters through
+	// every stub body when none of them exercise source routing or cancellation
+	// — the packages that own those behaviours test them directly. The stub
+	// answers for both sources so a test does not have to say which it means.
+	listClaudeSessionsFn = func(_ string, _ context.Context, cwd string) ([]claudesessions.Session, bool, error) {
 		return fn(cwd)
 	}
 	t.Cleanup(func() { listClaudeSessionsFn = prev })
@@ -666,7 +667,7 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 func stubSessionDetail(t *testing.T, fn func(cwd, id string) (claudesessions.Detail, error)) {
 	t.Helper()
 	prev := readClaudeSessionDetailFn
-	readClaudeSessionDetailFn = func(_ context.Context, cwd, id string) (claudesessions.Detail, error) {
+	readClaudeSessionDetailFn = func(_ string, _ context.Context, cwd, id string) (claudesessions.Detail, error) {
 		return fn(cwd, id)
 	}
 	t.Cleanup(func() { readClaudeSessionDetailFn = prev })
@@ -857,7 +858,7 @@ func TestClaudeSessionsResponse_PassesABoundedContext(t *testing.T) {
 	t.Cleanup(func() { listClaudeSessionsFn = prev })
 
 	var gotCtx context.Context
-	listClaudeSessionsFn = func(ctx context.Context, _ string) ([]claudesessions.Session, bool, error) {
+	listClaudeSessionsFn = func(_ string, ctx context.Context, _ string) ([]claudesessions.Session, bool, error) {
 		gotCtx = ctx
 		return nil, false, nil
 	}
@@ -882,7 +883,7 @@ func TestClaudeSessionDetailResponse_PassesABoundedContext(t *testing.T) {
 	t.Cleanup(func() { readClaudeSessionDetailFn = prev })
 
 	var gotCtx context.Context
-	readClaudeSessionDetailFn = func(ctx context.Context, _, _ string) (claudesessions.Detail, error) {
+	readClaudeSessionDetailFn = func(_ string, ctx context.Context, _, _ string) (claudesessions.Detail, error) {
 		gotCtx = ctx
 		return claudesessions.Detail{}, nil
 	}

@@ -9,7 +9,28 @@ import (
 
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/tclaudesessions"
 )
+
+// isClaudeFamily reports whether a plugin type shares the Claude-style session
+// resume machinery (preassigned session id, hook-tracked rotation, transcript
+// under ~/.<config-dir>/projects). claude-code reads ~/.claude; tclaude (the
+// Tencent wrapper) reads ~/.tclaude. Used to gate occupancy, hook injection,
+// resume-template promotion, and plugin-state refresh — every site that was
+// once hardcoded to "claude-code".
+func isClaudeFamily(pluginName string) bool {
+	return pluginName == "claude-code" || pluginName == "tclaude"
+}
+
+// resumeSource maps a claude-family plugin name to the session source string
+// the IPC/TUI uses to route transcript reads: "tclaude" for the Tencent
+// wrapper, "" (which the daemon reads as Claude Code) for claude-code itself.
+func resumeSource(pluginName string) string {
+	if pluginName == "tclaude" {
+		return "tclaude"
+	}
+	return ""
+}
 
 // resumeSessionIDRe is the canonical UUID shape, which is what Claude actually
 // mints for a session id. The value arrives over IPC and becomes the operand of
@@ -80,7 +101,17 @@ func (d *Daemon) applyResumeSessionID(pane *Pane, raw string) {
 // the request that triggered it.
 const discoveryTimeout = 10 * time.Second
 
-var listClaudeSessionsFn = claudesessions.List
+// listClaudeSessionsFn enumerates sessions for a CWD, routed by source:
+// "tclaude" reads ~/.tclaude/projects (the Tencent wrapper), anything else
+// reads ~/.claude/projects (Claude Code). A package-level var so tests can
+// swap it without a real home directory; production dispatches to the two
+// real packages.
+var listClaudeSessionsFn = func(source string, ctx context.Context, cwd string) ([]claudesessions.Session, bool, error) {
+	if source == "tclaude" {
+		return tclaudesessions.List(ctx, cwd)
+	}
+	return claudesessions.List(ctx, cwd)
+}
 
 // handleClaudeSessionsReq answers the pane setup dialog's session picker.
 //
@@ -180,7 +211,7 @@ func (d *Daemon) claudeSessionsResponse(msg *ipc.Message) ipc.ClaudeSessionsResp
 	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 	defer cancel()
 
-	sessions, truncated, err := listClaudeSessionsFn(ctx, scanCWD)
+	sessions, truncated, err := listClaudeSessionsFn(req.Source, ctx, scanCWD)
 	if err != nil {
 		log.Printf("claude sessions: list %q: %v", scanCWD, err)
 		return ipc.ClaudeSessionsRespPayload{CWD: req.CWD, Error: "could not read session history"}
@@ -205,7 +236,13 @@ func (d *Daemon) claudeSessionsResponse(msg *ipc.Message) ipc.ClaudeSessionsResp
 
 // readClaudeSessionDetailFn is the deep-read seam, mirroring
 // listClaudeSessionsFn so tests never touch a real ~/.claude directory.
-var readClaudeSessionDetailFn = claudesessions.ReadDetail
+// Routed by source like the listing: "tclaude" reads ~/.tclaude, else ~/.claude.
+var readClaudeSessionDetailFn = func(source string, ctx context.Context, cwd, sessionID string) (claudesessions.Detail, error) {
+	if source == "tclaude" {
+		return tclaudesessions.ReadDetail(ctx, cwd, sessionID)
+	}
+	return claudesessions.ReadDetail(ctx, cwd, sessionID)
+}
 
 // handleClaudeSessionDetailReq answers the picker's info key for one session.
 //
@@ -302,7 +339,7 @@ func claudeSessionDetailResponse(msg *ipc.Message) ipc.ClaudeSessionDetailRespPa
 	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 	defer cancel()
 
-	detail, err := readClaudeSessionDetailFn(ctx, readCWD, req.SessionID)
+	detail, err := readClaudeSessionDetailFn(req.Source, ctx, readCWD, req.SessionID)
 	if err != nil {
 		log.Printf("claude session detail: read %q: %v", req.SessionID, err)
 		echo.Error = "could not read this session's transcript"
@@ -458,7 +495,7 @@ func (d *Daemon) claudeSessionIDs(includePending bool) map[string]string {
 			running := hasPTY && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
 
-			if typ != "claude-code" {
+			if !isClaudeFamily(typ) {
 				continue
 			}
 			// No PTY at all = never spawned: either just created (its claim is

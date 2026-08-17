@@ -419,7 +419,7 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			var hookID, transcript string
 			switch pane.Type {
-			case "claude-code":
+			case "claude-code", "tclaude":
 				if rec, err := readHookSessionFn(pane.ID); err == nil {
 					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
@@ -3272,7 +3272,7 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
-	case p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id":
+	case isClaudeFamily(p.Name) && p.Persistence.Strategy == "preassign_id":
 		return claudeResumeTemplate(p, pane, claim)
 	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
 		return opencodeResumeTemplate(p, pane)
@@ -3685,7 +3685,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// cannot resurface on a later restore either. Read off-lock: never hold
 		// PluginMu across a file read.
 		hookID := ""
-		if p.Name == "claude-code" {
+		if isClaudeFamily(p.Name) {
 			if rec, err := readHookSessionFn(pane.ID); err == nil {
 				hookID = rec.ID
 			}
@@ -3734,7 +3734,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
 	switch p.Name {
-	case "claude-code":
+	case "claude-code", "tclaude":
+		// tclaude forwards --settings to upstream claude unchanged, so the same
+		// SessionStart hook registers and writes ~/.quil/sessions/<paneID>.id.
+		// paneID is a UUID unique across plugin types, so claude-code and tclaude
+		// panes never collide on the same .id file. Firing the hook for tclaude
+		// is what lets /clear /resume /compaction rotation get tracked — without
+		// it a tclaude pane would resume the pre-rotation id after a restart.
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)

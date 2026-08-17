@@ -1,0 +1,115 @@
+# tclaude — Tencent wrapper around Claude Code
+# Built-in plugin. Edit to customize; delete the file to restore defaults.
+
+# tclaude (npm @tencent/tclaude) forwards every argument to upstream Claude
+# Code but sets CLAUDE_CONFIG_DIR=~/.tclaude internally, so its sessions live
+# at ~/.tclaude/projects/<escaped-cwd>/<uuid>.jsonl rather than ~/.claude/.
+#
+# This plugin is the tclaude counterpart of the built-in "claude-code" plugin.
+# A fork of quil extends the resume machinery to recognize "tclaude" alongside
+# "claude-code": the session picker (sessions = "tclaude") lists transcripts
+# from ~/.tclaude, the SessionStart hook tracks /clear /resume /compaction
+# rotation, and the preassign_id resume promotion probes ~/.tclaude for the
+# transcript. So tclaude panes get the same resume behavior claude-code panes
+# always had — including automatic reattach after a daemon/computer restart.
+#
+# One nuance: tclaude injects its own `--settings {availableModels:...}` for
+# the model picker, and Quil injects `--settings <hook-json>` for session-id
+# rotation tracking. Both reach upstream claude; the hook settings (Quil's,
+# later on the command line) win on conflicting keys, but the keys are
+# disjoint (hooks vs availableModels) and tclaude's model resolution still
+# works through its default-model path, so this coexistence is benign in
+# practice.
+
+[plugin]
+name = "tclaude"
+display_name = "TClaude"
+category = "ai"
+description = "Tencent wrapper around Claude Code (resumes ~/.tclaude sessions)"
+schema_version = 2
+
+[command]
+cmd = "tclaude"
+# path = "/path/to/tclaude"  # uncomment to override PATH lookup
+detect = "tclaude --version"
+prompts_cwd = true  # ask which folder to open tclaude in (scopes the session to that project)
+# List the tclaude transcripts recorded for the chosen directory
+# (~/.tclaude/projects/<escaped-cwd>/*.jsonl) and, when one is picked, spawn
+# `tclaude --resume <id>` in place of the --session-id start args below.
+sessions = "tclaude"
+record_history = true  # capture submitted prompts to <quilDir>/history/<paneID>.jsonl
+
+# Runtime toggles — same set as the built-in claude-code plugin.
+#
+# The two permission-mode toggles share group = "permission_mode", which makes
+# them mutually exclusive (rendered as radio buttons); enabling one disables
+# the other. Both default to false, so you can also pick neither (tclaude's
+# standard interactive confirmations). These flags pass straight through to
+# upstream claude — tclaude forwards all args it does not own.
+[[command.toggles]]
+name = "dangerously_skip_permissions"
+label = "Dangerously skip permissions (no confirmations)"
+args_when_on = ["--dangerously-skip-permissions"]
+default = false
+group = "permission_mode"
+
+[[command.toggles]]
+name = "enable_auto_mode"
+label = "Enable auto mode (safer than skipping permissions)"
+args_when_on = ["--enable-auto-mode"]
+default = false
+group = "permission_mode"
+
+[persistence]
+strategy = "preassign_id"
+# Scrollback is saved and replayed, so a reattached pane keeps its conversation
+# history. tclaude writes to the MAIN screen and scrolls normally (same render
+# model as claude-code), so its output stream replays into coherent history —
+# the same reasoning the built-in plugin uses for ghost_buffer = true.
+ghost_buffer = true
+# Ctrl+L (form feed) to repaint on reattach when there is no replay. claude-code
+# (and thus tclaude) re-lays-out on SIGWINCH but only paints on its own render
+# tick, so a resize produces nothing; the key drives a repaint. Declaring a key
+# also SUPPRESSES the resize fallback, which is correct here.
+redraw_key = "\f"
+# Quil generates a UUID and stores it as session_id in plugin state, then
+# expands it into start_args on first launch. tclaude forwards --session-id to
+# upstream claude, which creates the session under
+# ~/.tclaude/projects/<escaped-cwd>/<session_id>.jsonl.
+start_args = ["--session-id", "{session_id}"]
+# On daemon restart, Quil loads the saved session_id and the daemon's
+# claude-family resume promotion expands --resume (probing ~/.tclaude for the
+# transcript the same way it probes ~/.claude for claude-code). tclaude
+# forwards --resume to upstream claude, which reattaches to that conversation.
+resume_args = ["--resume", "{session_id}"]
+
+[[error_handlers]]
+# tclaude's login failures surface as IOA/auth errors rather than a bare
+# ANTHROPIC_API_KEY message, but keep the claude one too for forwarded cases.
+pattern = '(?i)error.*API key not found|ANTHROPIC_API_KEY.*not set|not logged in|login required|IOA'
+title = "Authentication Required"
+message = "Run `tclaude login` in a terminal first, or set ANTHROPIC_API_KEY in your environment."
+action = "dialog"
+
+# Idle handlers — checked when the pane goes idle (last lines analyzed).
+# Same set as the built-in claude-code plugin; tclaude shares claude's UI.
+[[idle_handlers]]
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)(plan|question|choose|select|pick)'
+title = "Waiting for your choice"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '❯|> $'
+title = "Waiting for input"
+severity = "info"
+
+[display]
+# Window-sized canvas: the PTY never resizes with the pane rect; small panes
+# show a soft-wrapped preview. Zoom (Ctrl+E) shows the native render. Same as
+# claude-code — tclaude's transcript is immutable hard-wrapped text.
+wide_canvas = true

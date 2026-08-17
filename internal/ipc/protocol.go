@@ -774,8 +774,15 @@ type PaneSearchRespPayload struct {
 // sessions recorded for CWD. CWD is the directory currently highlighted in the
 // pane setup dialog — not yet committed, which is why the response echoes it
 // back for staleness comparison.
+//
+// Source selects which transcript store to read: "" or "claude" reads
+// ~/.claude/projects (Claude Code), "tclaude" reads ~/.tclaude/projects (the
+// Tencent wrapper, which sets CLAUDE_CONFIG_DIR=~/.tclaude). It is omitted by
+// older TUIs, which default to claude — keeping a mixed-version TUI/daemon
+// pair working for claude-code panes during an upgrade.
 type ClaudeSessionsReqPayload struct {
-	CWD string `json:"cwd"`
+	CWD    string `json:"cwd"`
+	Source string `json:"source,omitempty"`
 }
 
 // ClaudeSessionInfo is one resumable session. InUsePaneID identifies the live
@@ -1012,9 +1019,13 @@ type WorktreeStatusRespPayload struct {
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the
 // listing head-reads every transcript in a directory, so this is issued per
 // user request (the picker's info key), never per listing.
+//
+// Source mirrors ClaudeSessionsReqPayload: "" or "claude" reads ~/.claude,
+// "tclaude" reads ~/.tclaude.
 type ClaudeSessionDetailReqPayload struct {
 	CWD       string `json:"cwd"`
 	SessionID string `json:"session_id"`
+	Source    string `json:"source,omitempty"`
 }
 
 // ClaudeSessionDetailRespPayload answers with one session's summary. CWD and
