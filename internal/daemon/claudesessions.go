@@ -22,16 +22,6 @@ func isClaudeFamily(pluginName string) bool {
 	return pluginName == "claude-code" || pluginName == "tclaude"
 }
 
-// resumeSource maps a claude-family plugin name to the session source string
-// the IPC/TUI uses to route transcript reads: "tclaude" for the Tencent
-// wrapper, "" (which the daemon reads as Claude Code) for claude-code itself.
-func resumeSource(pluginName string) string {
-	if pluginName == "tclaude" {
-		return "tclaude"
-	}
-	return ""
-}
-
 // resumeSessionIDRe is the canonical UUID shape, which is what Claude actually
 // mints for a session id. The value arrives over IPC and becomes the operand of
 // `--resume` in the spawned process's argv, so it is validated rather than

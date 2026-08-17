@@ -3746,12 +3746,16 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	envVars := append([]string{}, p.Command.Env...)
 	switch p.Name {
 	case "claude-code", "tclaude":
-		// tclaude forwards --settings to upstream claude unchanged, so the same
-		// SessionStart hook registers and writes ~/.quil/sessions/<paneID>.id.
-		// paneID is a UUID unique across plugin types, so claude-code and tclaude
-		// panes never collide on the same .id file. Firing the hook for tclaude
-		// is what lets /clear /resume /compaction rotation get tracked — without
-		// it a tclaude pane would resume the pre-rotation id after a restart.
+		// Inject the SessionStart hook (writes ~/.quil/sessions/<paneID>.id,
+		// the authoritative id the restore path resumes). For claude-code this
+		// works as designed. For tclaude the hook is injected identically, but
+		// the tclaude wrapper does not execute hooks passed via --settings, so
+		// the .id file is never written and in-pane /clear /resume /compaction
+		// rotation is NOT tracked for tclaude — a restart resumes the
+		// workspace.json session_id (the pre-rotation one) instead. The core
+		// reboot-resume still works because it reads workspace.json, not the
+		// hook file. paneID is a UUID unique across plugin types, so claude-code
+		// and tclaude panes never collide on the same .id file.
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
